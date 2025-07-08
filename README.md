@@ -30,7 +30,7 @@ The project is ready to soon incorporate results obtained d-wave's Advantage 2.
 
 2. Install dependencies:
    ```bash
-   pip install -r requirements.txt
+   conda install -y --file requirements.txt
    ```
 
 ## Contributing
