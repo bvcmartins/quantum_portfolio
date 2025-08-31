@@ -6,8 +6,13 @@ from functools import partial
 import gc
 from dimod import BinaryQuadraticModel, ConstrainedQuadraticModel, Binary, quicksum
 from dwave.samplers import SimulatedAnnealingSampler, TabuSampler, SteepestDescentSampler
-from dwave.system import LeapHybridBQMSampler, LeapHybridCQMSampler
+from dwave.system import LeapHybridBQMSampler, LeapHybridCQMSampler, LeapHybridSampler
 from dimod import ExactSolver
+try:
+    from dwave.optimization import Model
+    DWAVE_NL_AVAILABLE = True
+except ImportError:
+    DWAVE_NL_AVAILABLE = False
 from itertools import product
 
 seed = 12
@@ -273,79 +278,123 @@ def riskfolio_sharpe_optimized(data):
         return equal_weights_baseline(data)
 
 
-def dwave_cqm_sharpe_minimize(data, budget=1.0, min_investment=0.001):
+def dwave_quantum_sharpe_minimize(data, budget=1.0, min_investment=0.001, risk_free_rate=0.0):
     """
-    D-Wave CQM optimization for risk-neutral Sharpe ratio.
+    D-Wave Non-Linear Programming optimization for risk-neutral Sharpe ratio.
     
-    Uses ConstrainedQuadraticModel to maximize Sharpe ratio with explicit constraints.
+    Uses D-Wave's Non-Linear Programming solver with binary and continuous variables 
+    for minimum investment constraints (practical trading).
     
     Constraints satisfied:
     - Budget: sum(investments) <= budget
-    - Every asset allocated: min_investment constraint per asset
+    - Every asset allocated: minimum investment enforced via binary variables
+    - Practical trading: if investing, must invest at least min_investment
     
     Args:
         data: Stock price data (DataFrame)
         budget: Total budget (default 1.0 for normalized weights)
-        min_investment: Minimum investment per asset
+        min_investment: Minimum investment per asset (practical trading constraint)
+        risk_free_rate: Risk-free rate for Sharpe calculation
     
     Returns:
         weights: Optimized portfolio weights
     """
-    
+    # Check if D-Wave NL is available
     try:
-        n_assets = len(data.columns)
+        # Prepare data
         returns = np.log(data) - np.log(data.shift(1))
-        expected_returns = returns.mean().values
-        cov_matrix = returns.cov().values
+        expected_annual_returns = returns.mean().values
+        annual_covariance = returns.cov().values
+        n_assets = len(expected_annual_returns)
         
-        # Create CQM model
-        model = ConstrainedQuadraticModel()
+        # Create Non-Linear Programming model
+        model = Model()
         
-        # Decision variables: investment amounts
-        investments = [model.continuous(lower_bound=min_investment, upper_bound=budget) 
-                      for _ in range(n_assets)]
+        # Binary: whether to invest in each asset
+        invest_binary = [model.binary() for _ in range(n_assets)]
         
-        # Budget constraint
-        model.add_constraint(sum(investments) <= budget)
-        model.add_constraint(sum(investments) >= budget * 0.99)  # Ensure nearly full investment
+        # Decision: scaled integer amounts to invest in each asset (scaled by 10000 for precision)
+        # Since D-Wave optimization only supports integer variables, we scale up
+        scale_factor = 10000
+        max_scaled_investment = int(budget * scale_factor)
+        investments = [model.integer(lower_bound=0, upper_bound=max_scaled_investment) for _ in range(n_assets)]
         
-        # Calculate portfolio return and variance
+        # Budget constraint (scaled)
+        model.add_constraint(sum(investments) <= int(budget * scale_factor))
+        
+        # Minimum investment constraints (PRACTICAL REASONS):
+        min_scaled_investment = int(min_investment * scale_factor)
+        max_scaled_investment_per_asset = int(budget * scale_factor)
+        
+        for i in range(n_assets):
+            # If investing, must invest at least min_investment (transaction costs, etc.)
+            model.add_constraint(investments[i] >= min_scaled_investment * invest_binary[i])
+            # If not investing, investment is 0
+            model.add_constraint(investments[i] <= max_scaled_investment_per_asset * invest_binary[i])
+        
+        # Force investment in ALL assets (to ensure weights > 0)
+        for i in range(n_assets):
+            model.add_constraint(invest_binary[i] == 1)
+        
+        # Calculate weights (need to scale back down)
         total_investment = sum(investments)
         weights = [investments[i] / total_investment for i in range(n_assets)]
         
-        portfolio_return = sum(expected_returns[i] * weights[i] for i in range(n_assets))
-        portfolio_variance = sum(sum(cov_matrix[i][j] * weights[i] * weights[j] 
+        # Sharpe ratio calculation - TRUE NON-LINEAR OBJECTIVE
+        portfolio_return = sum(expected_annual_returns[i] * weights[i] 
+                              for i in range(n_assets))
+        portfolio_variance = sum(sum(annual_covariance[i][j] * weights[i] * weights[j] 
                                     for j in range(n_assets)) 
-                               for i in range(n_assets))
+                                for i in range(n_assets))
         
-        # Objective: maximize Sharpe ratio (minimize negative Sharpe)
-        # Approximate sqrt for quadratic model: use variance instead of std dev
-        # This optimizes return/variance which is monotonic with Sharpe for positive returns
-        model.minimize(-portfolio_return + 0.001 * portfolio_variance)
+        # Non-linear Sharpe ratio: (return - risk_free_rate) / sqrt(variance)
+        portfolio_std = model.sqrt(portfolio_variance)
         
-        # Try to solve with D-Wave
+        # Add constraint to ensure portfolio standard deviation is strictly positive
+        # This prevents division by zero in the Sharpe ratio
+        min_std = 0.0001  # Minimum allowed standard deviation
+        model.add_constraint(portfolio_std >= min_std)
+        
+        sharpe_ratio = (portfolio_return - risk_free_rate) / portfolio_std
+        
+        # Minimize negative Sharpe ratio (maximize Sharpe ratio)
+        model.minimize(-sharpe_ratio)
+        
+        # Try to solve with D-Wave Non-Linear solver
         try:
-            sampler = LeapHybridCQMSampler()
-            sampleset = sampler.sample_cqm(model, label="Sharpe_CQM_Portfolio")
+            sampler = LeapHybridSampler()
+            sampleset = sampler.sample(model, label="NonLinear_Sharpe_Portfolio")
             
             if len(sampleset) > 0:
-                best_sample = sampleset.first.sample
-                investment_values = [best_sample[f'investments_{i}'] for i in range(n_assets)]
-                weights = np.array(investment_values)
+                # Get the best solution
+                best_sample = sampleset.first
+                
+                # Extract investment values
+                investment_values = []
+                for i in range(n_assets):
+                    investment_values.append(best_sample.samples[0][investments[i]])
+                
+                # Convert to weights
+                total_inv = sum(investment_values)
+                if total_inv > 0:
+                    weights = np.array([inv / total_inv for inv in investment_values])
+                else:
+                    weights = np.ones(n_assets) / n_assets
+                
                 weights = ensure_valid_weights(weights)
                 
-                logger.debug(f'D-Wave CQM completed. Sharpe: {sharpe_fitness_function(weights, data):.4f}')
+                logger.debug(f'D-Wave Non-Linear completed. Sharpe: {sharpe_fitness_function(weights, data):.4f}')
                 return weights
             else:
-                logger.warning("D-Wave CQM returned no solutions. Using equal weights.")
+                logger.warning("D-Wave Non-Linear solver returned no solutions. Using equal weights.")
                 return equal_weights_baseline(data)
                 
         except Exception as e:
-            logger.warning(f"D-Wave CQM execution failed: {e}. Using equal weights.")
+            logger.warning(f"D-Wave Non-Linear solver failed: {e}. Using equal weights.")
             return equal_weights_baseline(data)
             
     except Exception as e:
-        logger.error(f'D-Wave CQM setup error: {e}. Using equal weights.')
+        logger.error(f'D-Wave Non-Linear setup error: {e}. Using equal weights.')
         return equal_weights_baseline(data)
 
 
@@ -459,102 +508,3 @@ def dwave_classical_sharpe(data, n_levels=5, sampler_type='simulated_annealing')
     except Exception as e:
         logger.error(f'D-Wave Classical QUBO error: {e}. Using equal weights.')
         return equal_weights_baseline(data)
-
-
-def dwave_quantum_sharpe(data, n_levels=5):
-    """
-    Quantum D-Wave QUBO optimization for risk-neutral Sharpe ratio.
-    
-    Same formulation as classical version but uses quantum annealer.
-    
-    Constraints satisfied:
-    - Budget: weights sum to 1 through normalization  
-    - Every asset allocated: each asset gets one discrete level
-    
-    Args:
-        data: Stock price data (DataFrame)
-        n_levels: Number of discrete investment levels per asset
-    
-    Returns:
-        weights: Optimized portfolio weights
-    """
-    try:
-        # Same setup as classical version
-        returns = np.log(data) - np.log(data.shift(1))
-        avg_returns = returns.mean().fillna(0)
-        cov_matrix = returns.cov().fillna(0)
-        
-        stocks = data.columns.tolist()
-        n_stocks = len(stocks)
-        
-        # Try quantum sampler
-        try:
-            sampler = LeapHybridBQMSampler()
-            logger.debug("Connected to D-Wave Leap quantum service")
-        except Exception as e:
-            logger.warning(f"D-Wave quantum connection failed: {e}. Using classical.")
-            return dwave_classical_sharpe(data, n_levels, 'simulated_annealing')
-        
-        # Create same BQM as classical version
-        bqm = BinaryQuadraticModel('BINARY')
-        
-        # Same variable and constraint setup as classical version
-        for i, stock in enumerate(stocks):
-            for level in range(n_levels):
-                var_name = f"{stock}_{level}"
-                weight = (level + 1) / (n_levels * n_stocks)
-                return_contrib = avg_returns.iloc[i] * weight
-                bqm.add_variable(var_name, return_contrib)
-        
-        # Risk terms
-        for i, stock1 in enumerate(stocks):
-            for j, stock2 in enumerate(stocks):
-                for level1 in range(n_levels):
-                    for level2 in range(n_levels):
-                        var1 = f"{stock1}_{level1}"
-                        var2 = f"{stock2}_{level2}"
-                        
-                        weight1 = (level1 + 1) / (n_levels * n_stocks)
-                        weight2 = (level2 + 1) / (n_levels * n_stocks)
-                        risk_coeff = -0.5 * cov_matrix.iloc[i, j] * weight1 * weight2
-                        
-                        if i == j and level1 == level2:
-                            bqm.add_variable(var1, risk_coeff)
-                        else:
-                            bqm.add_interaction(var1, var2, risk_coeff)
-        
-        # Constraints
-        penalty_strength = 100
-        for stock in stocks:
-            stock_vars = [f"{stock}_{level}" for level in range(n_levels)]
-            
-            for var in stock_vars:
-                bqm.add_variable(var, penalty_strength * (-2))
-            
-            for var1 in stock_vars:
-                for var2 in stock_vars:
-                    if var1 != var2:
-                        bqm.add_interaction(var1, var2, penalty_strength * 2)
-        
-        # Quantum solve
-        sampleset = sampler.sample(bqm, label=f"Quantum_Sharpe_Portfolio_{n_stocks}assets")
-        
-        # Extract solution
-        best_sample = sampleset.first.sample
-        weights = np.zeros(n_stocks)
-        
-        for i, stock in enumerate(stocks):
-            for level in range(n_levels):
-                var_name = f"{stock}_{level}"
-                if best_sample.get(var_name, 0) == 1:
-                    weights[i] = (level + 1) / (n_levels * n_stocks)
-                    break
-        
-        weights = ensure_valid_weights(weights)
-        
-        logger.debug(f'D-Wave Quantum completed. Sharpe: {sharpe_fitness_function(weights, data):.4f}')
-        return weights
-        
-    except Exception as e:
-        logger.error(f'D-Wave Quantum error: {e}. Using classical QUBO.')
-        return dwave_classical_sharpe(data, n_levels, 'simulated_annealing')
