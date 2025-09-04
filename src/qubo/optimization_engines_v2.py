@@ -8,6 +8,7 @@ from dimod import BinaryQuadraticModel, ConstrainedQuadraticModel, Binary, quick
 from dwave.samplers import SimulatedAnnealingSampler, TabuSampler, SteepestDescentSampler
 from dwave.system import LeapHybridBQMSampler, LeapHybridCQMSampler, LeapHybridSampler
 from dimod import ExactSolver
+from dimod import Integer
 from itertools import product
 
 seed = 12
@@ -228,125 +229,7 @@ def riskfolio_qubo(data):
         return np.full(n_assets, 1.0 / n_assets)
 
 
-def dwave_bqm_qubo(data, budget=1.0, min_investment=0.001):
-    """
-    D-Wave BQM (Binary Quadratic Model) for QUBO portfolio optimization.
-    
-    Uses fixed risk level of 0.5 in the QUBO formulation.
-    
-    Args:
-        data: Stock price DataFrame
-        budget: Total budget (default 1.0 for normalized weights)
-        min_investment: Minimum investment per asset
-        
-    Returns:
-        weights: Optimized portfolio weights
-    """
-    try:
-        # Prepare data
-        returns = np.log(data) - np.log(data.shift(1))
-        expected_returns = returns.mean().values
-        covariance_matrix = returns.cov().values
-        n_assets = len(expected_returns)
-        
-        # QUBO formulation parameters
-        risk_level = 0.5
-        precision = 100  # Scale factor for integer weights
-        
-        # Create BQM
-        bqm = BinaryQuadraticModel({}, {}, 0.0, 'BINARY')
-        
-        # Create binary variables for each possible investment level per asset
-        # Each asset can have investment levels: 0, min_investment, 2*min_investment, ..., budget
-        max_investment_units = int(budget / min_investment)
-        
-        # Variables: x[asset][level] = 1 if asset has investment level
-        variables = {}
-        for i in range(n_assets):
-            for level in range(max_investment_units + 1):
-                var_name = f'x_{i}_{level}'
-                variables[(i, level)] = var_name
-                bqm.add_variable(var_name, 0.0)
-        
-        # Constraint: exactly one investment level per asset
-        for i in range(n_assets):
-            asset_vars = [variables[(i, level)] for level in range(max_investment_units + 1)]
-            # Add penalty for not selecting exactly one level
-            penalty = 1000.0
-            for j, var1 in enumerate(asset_vars):
-                for k, var2 in enumerate(asset_vars):
-                    if j == k:
-                        bqm.add_variable(var1, -penalty)  # Reward selecting one
-                    else:
-                        bqm.add_interaction(var1, var2, penalty)  # Penalize selecting multiple
-        
-        # Budget constraint
-        budget_penalty = 1000.0
-        total_investment = 0
-        for i in range(n_assets):
-            for level in range(1, max_investment_units + 1):  # Skip level 0 (no investment)
-                investment_amount = level * min_investment
-                var_name = variables[(i, level)]
-                total_investment += investment_amount
-                # Penalty for exceeding budget
-                if total_investment > budget:
-                    bqm.add_variable(var_name, budget_penalty * (total_investment - budget))
-        
-        # Objective: maximize return - risk_level * variance
-        for i in range(n_assets):
-            for level in range(1, max_investment_units + 1):
-                weight = (level * min_investment) / budget
-                var_name = variables[(i, level)]
-                # Add return component (negative because BQM minimizes)
-                bqm.add_variable(var_name, -expected_returns[i] * weight * precision)
-                
-                # Add risk component (variance)
-                for j in range(n_assets):
-                    for level2 in range(1, max_investment_units + 1):
-                        weight2 = (level2 * min_investment) / budget
-                        var_name2 = variables[(j, level2)]
-                        risk_term = risk_level * covariance_matrix[i][j] * weight * weight2 * precision
-                        if i == j:
-                            bqm.add_variable(var_name, risk_term)
-                        else:
-                            bqm.add_interaction(var_name, var_name2, risk_term / 2)
-        
-        # Solve with D-Wave
-        try:
-            sampler = LeapHybridBQMSampler()
-            sampleset = sampler.sample(bqm, label="QUBO_Portfolio")
-            
-            if len(sampleset) > 0:
-                best_sample = sampleset.first.sample
-                
-                # Extract weights from solution
-                weights = np.zeros(n_assets)
-                for i in range(n_assets):
-                    for level in range(max_investment_units + 1):
-                        var_name = variables[(i, level)]
-                        if best_sample.get(var_name, 0) == 1:
-                            weights[i] = (level * min_investment) / budget
-                            break
-                
-                # Normalize weights
-                if weights.sum() > 0:
-                    weights = weights / weights.sum()
-                    return weights
-        
-        except Exception as e:
-            logger.warning(f"D-Wave BQM solver error: {e}")
-        
-        # Fallback to equal weights
-        logger.warning("D-Wave BQM optimization failed. Using equal weights.")
-        return np.full(n_assets, 1.0 / n_assets)
-        
-    except Exception as e:
-        logger.error(f"D-Wave BQM setup error: {e}")
-        n_assets = len(data.columns)
-        return np.full(n_assets, 1.0 / n_assets)
-
-
-def dwave_cqm_qubo(data, budget=1.0, min_investment=0.001):
+def dwave_cqm_qubo(data, budget=1.0):
     """
     D-Wave CQM (Constrained Quadratic Model) for QUBO portfolio optimization.
     
@@ -355,99 +238,42 @@ def dwave_cqm_qubo(data, budget=1.0, min_investment=0.001):
     Args:
         data: Stock price DataFrame
         budget: Total budget (default 1.0 for normalized weights)
-        min_investment: Minimum investment per asset
         
     Returns:
         weights: Optimized portfolio weights
     """
-    try:
-        # Prepare data
-        returns = np.log(data) - np.log(data.shift(1))
-        expected_returns = returns.mean().values
-        covariance_matrix = returns.cov().values
-        n_assets = len(expected_returns)
-        
-        # Create CQM
-        cqm = ConstrainedQuadraticModel()
-        
-        # Binary variables: whether to invest in each asset
-        invest_binary = [Binary(f'invest_{i}') for i in range(n_assets)]
-        
-        # Integer variables: investment amounts (scaled by 1000 for precision)
-        scale_factor = 1000
-        max_investment = int(budget * scale_factor)
-        investments = []
-        for i in range(n_assets):
-            var_name = f'investment_{i}'
-            investments.append(var_name)
-            cqm.add_variable('INTEGER', var_name, lower_bound=0, upper_bound=max_investment)
-        
-        # Budget constraint
-        budget_constraint = quicksum(investments) <= int(budget * scale_factor)
-        cqm.add_constraint(budget_constraint, label='budget')
-        
-        # Minimum investment constraints
-        min_scaled_investment = int(min_investment * scale_factor)
-        for i in range(n_assets):
-            # If investing, must invest at least min_investment
-            min_constraint = investments[i] >= min_scaled_investment * invest_binary[i]
-            cqm.add_constraint(min_constraint, label=f'min_investment_{i}')
-            
-            # If not investing, investment is 0
-            max_constraint = investments[i] <= max_investment * invest_binary[i]
-            cqm.add_constraint(max_constraint, label=f'max_investment_{i}')
-        
-        # Force investment in all assets (every asset gets allocated)
-        for i in range(n_assets):
-            cqm.add_constraint(invest_binary[i] == 1, label=f'force_invest_{i}')
-        
-        # QUBO Objective: maximize return - risk_level * variance
-        risk_level = 0.5
-        objective = 0
-        
-        # Return component
-        total_investment = quicksum(investments)
-        for i in range(n_assets):
-            weight = investments[i] / total_investment
-            objective += expected_returns[i] * weight
-        
-        # Risk component (variance)
-        for i in range(n_assets):
-            for j in range(n_assets):
-                weight_i = investments[i] / total_investment
-                weight_j = investments[j] / total_investment
-                objective -= risk_level * covariance_matrix[i][j] * weight_i * weight_j
-        
-        # Set objective (CQM minimizes, so negate for maximization)
-        cqm.set_objective(-objective)
-        
-        # Solve with D-Wave
-        try:
-            sampler = LeapHybridCQMSampler()
-            sampleset = sampler.sample_cqm(cqm, label="QUBO_CQM_Portfolio")
-            
-            if len(sampleset) > 0:
-                best_sample = sampleset.first.sample
-                
-                # Extract investment amounts
-                investment_amounts = np.zeros(n_assets)
-                for i in range(n_assets):
-                    investment_amounts[i] = best_sample.get(f'investment_{i}', 0) / scale_factor
-                
-                # Convert to weights
-                total = investment_amounts.sum()
-                if total > 0:
-                    weights = investment_amounts / total
-                    return weights
-        
-        except Exception as e:
-            logger.warning(f"D-Wave CQM solver error: {e}")
-        
-        # Fallback to equal weights
-        logger.warning("D-Wave CQM optimization failed. Using equal weights.")
-        return np.full(n_assets, 1.0 / n_assets)
-        
-    except Exception as e:
-        logger.error(f"D-Wave CQM setup error: {e}")
-        n_assets = len(data.columns)
-        return np.full(n_assets, 1.0 / n_assets)
+    alpha = 0.5
+    returns = np.log(data) - np.log(data.shift(1))
+    expected_returns = returns.mean()
+    covariance_matrix = returns.cov()
+    cqm = ConstrainedQuadraticModel()
+    stocks = data.columns.tolist()
+    price = data.iloc[-1, :]
+    max_num_shares = (budget / price).astype(int)
+    x = {s: Integer("%s" %s, lower_bound=1, upper_bound=max_num_shares[s]) for s in stocks}
+
+    returns = 0
+    for s in stocks:
+        returns = returns + price[s] * expected_returns[s] * x[s]
+
+    risk = 0
+    for s1, s2 in product(stocks, stocks):
+        coeff = covariance_matrix[s1][s2] * price[s1] * price[s2]
+        risk = risk + coeff * x[s1] * x[s2]
+    cqm.add_constraint(quicksum([x[s] * price[s] for s in stocks]) <= budget, label='upper_budget')
+    cqm.set_objective(alpha * risk - returns)
+    cqm.substitute_self_loops()
+
+    sampler = LeapHybridCQMSampler()
+    results = sampler.sample_cqm(cqm, time_limit=5)
+    n_samples = len(results.record)
+    logger.info(f'n samples: {n_samples}')
+    feasible_samples = results.filter(lambda d: d.is_feasible)
+    best_sample = feasible_samples.first
+    amounts = []
+    for s in stocks:
+        amounts.append(best_sample.sample[s])
+    total = sum(amounts)
+    weights = amounts / total
+    weights
+    return weights 
