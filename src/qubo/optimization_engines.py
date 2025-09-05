@@ -213,7 +213,8 @@ def riskfolio_qubo(data):
             obj='Utility',  # Utility maximization (return - risk_aversion * risk)
             rf=0.0,  # Risk-free rate
             l=risk_aversion,  # Risk aversion parameter
-            hist=True
+            hist=True,
+            solver='MOSEK'
         )
         
         if weights is not None and len(weights) > 0:
@@ -229,7 +230,7 @@ def riskfolio_qubo(data):
         return np.full(n_assets, 1.0 / n_assets)
 
 
-def dwave_cqm_qubo(data, budget=1.0):
+def dwave_cqm_qubo(data, budget=1000000.0):
     """
     D-Wave CQM (Constrained Quadratic Model) for QUBO portfolio optimization.
     
@@ -249,7 +250,11 @@ def dwave_cqm_qubo(data, budget=1.0):
     cqm = ConstrainedQuadraticModel()
     stocks = data.columns.tolist()
     price = data.iloc[-1, :]
+    #print(f'price: {price}')
+    #print(f'budget: {budget}')
     max_num_shares = (budget / price).astype(int)
+    #print('max_num_shares')
+    #print(max_num_shares)
     x = {s: Integer("%s" %s, lower_bound=1, upper_bound=max_num_shares[s]) for s in stocks}
 
     returns = 0
@@ -262,7 +267,7 @@ def dwave_cqm_qubo(data, budget=1.0):
         risk = risk + coeff * x[s1] * x[s2]
     cqm.add_constraint(quicksum([x[s] * price[s] for s in stocks]) <= budget, label='upper_budget')
     cqm.set_objective(alpha * risk - returns)
-    cqm.substitute_self_loops()
+    #cqm.substitute_self_loops()
 
     sampler = LeapHybridCQMSampler()
     results = sampler.sample_cqm(cqm, time_limit=5)
@@ -275,5 +280,4 @@ def dwave_cqm_qubo(data, budget=1.0):
         amounts.append(best_sample.sample[s])
     total = sum(amounts)
     weights = amounts / total
-    weights
     return weights 
