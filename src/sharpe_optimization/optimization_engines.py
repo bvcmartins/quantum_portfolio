@@ -264,7 +264,8 @@ def riskfolio_sharpe_optimized(data):
             rm='MV',         # Mean-Variance risk measure
             obj='Sharpe',    # Maximize Sharpe ratio
             rf=0.0,          # Risk-free rate
-            l=0              # No regularization
+            l=0,              # No regularization,
+            solver='MOSEK'
         )
         
         weights = np.array(weights_rf).flatten()
