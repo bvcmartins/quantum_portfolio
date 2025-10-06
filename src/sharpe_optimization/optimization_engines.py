@@ -107,30 +107,35 @@ def equal_weights_baseline(data):
     return weights
 
 
-def genetic_algorithm_sharpe(data, population_size=500, num_generations=1000, mutation_rate=0.05, elitism=0.1):
+def genetic_algorithm_sharpe(data, population_size=500, num_generations=1000, mutation_rate=0.05, elitism=0.1, min_investment=0.001, max_weight=0.02):
     """
     Genetic algorithm optimizing risk-neutral Sharpe ratio.
-    
+
     Constraints satisfied:
     - Budget: weights normalized to sum to 1 each generation
     - Every asset allocated: minimum weight enforcement
-    
+    - Max weight per asset: 2% diversification constraint
+
     Args:
         data: Stock price data (DataFrame)
         population_size: Size of population
         num_generations: Number of generations
         mutation_rate: Mutation rate
         elitism: Elite preservation rate
-    
+        min_investment: Minimum weight per asset (default 0.001)
+        max_weight: Maximum weight per asset (default 0.02 = 2%)
+
     Returns:
         weights: Optimized portfolio weights
     """
     n_assets = len(data.columns)
-    
+
     # Initialize population with valid weights
     population = np.random.rand(population_size, n_assets)
     for i in range(population_size):
-        population[i] = ensure_valid_weights(population[i])
+        population[i] = ensure_valid_weights(population[i], min_weight_per_asset=min_investment)
+        population[i] = np.clip(population[i], min_investment, max_weight)
+        population[i] = population[i] / population[i].sum()
     
     # Evaluate fitness
     fitness = np.array([sharpe_fitness_function(individual, data) for individual in population])
@@ -163,7 +168,9 @@ def genetic_algorithm_sharpe(data, population_size=500, num_generations=1000, mu
                 offspring[mutation_idx] += np.random.normal(0, 0.01)
             
             # Ensure constraints
-            offspring = ensure_valid_weights(offspring)
+            offspring = ensure_valid_weights(offspring, min_weight_per_asset=min_investment)
+            offspring = np.clip(offspring, min_investment, max_weight)
+            offspring = offspring / offspring.sum()
             new_population = np.vstack([new_population, offspring])
         
         population = new_population
@@ -172,37 +179,39 @@ def genetic_algorithm_sharpe(data, population_size=500, num_generations=1000, mu
     # Return best individual
     best_idx = np.argmax(fitness)
     best_weights = population[best_idx]
-    
+
     logger.debug(f'GA Sharpe optimization completed. Best Sharpe: {fitness[best_idx]:.4f}')
-    return ensure_valid_weights(best_weights)
+    return ensure_valid_weights(best_weights, min_weight_per_asset=min_investment)
 
 
-def scipy_minimize_sharpe(data):
+def scipy_minimize_sharpe(data, min_investment=0.001, max_weight=0.02):
     """
     SciPy SLSQP optimization for risk-neutral Sharpe ratio.
-    
+
     Constraints satisfied:
     - Budget: equality constraint sum(weights) = 1
     - Every asset allocated: lower bound > 0 for all assets
-    
+    - Max weight per asset: 2% diversification constraint
+
     Args:
         data: Stock price data (DataFrame)
-    
+        min_investment: Minimum weight per asset (default 0.001)
+        max_weight: Maximum weight per asset (default 0.02 = 2%)
+
     Returns:
         weights: Optimized portfolio weights
     """
     n_assets = len(data.columns)
-    min_weight = 0.001  # Minimum allocation per asset
-    
+
     # Objective: minimize negative Sharpe (to maximize Sharpe)
     def objective(weights):
         return -sharpe_fitness_function(weights, data)
-    
+
     # Constraints
     constraints = {'type': 'eq', 'fun': lambda x: np.sum(x) - 1}
-    
-    # Bounds: minimum allocation per asset, max 50% per asset for diversification
-    bounds = tuple((min_weight, 0.5) for _ in range(n_assets))
+
+    # Bounds: minimum allocation per asset, max 2% per asset for diversification
+    bounds = tuple((min_investment, max_weight) for _ in range(n_assets))
     
     # Initial guess: equal weights
     x0 = np.ones(n_assets) / n_assets
@@ -220,7 +229,7 @@ def scipy_minimize_sharpe(data):
         
         if result.success:
             weights = result.x
-            weights = ensure_valid_weights(weights)
+            weights = ensure_valid_weights(weights, min_weight_per_asset=min_investment)
             logger.debug(f'SciPy SLSQP completed successfully. Sharpe: {sharpe_fitness_function(weights, data):.4f}')
             return weights
         else:
@@ -232,20 +241,23 @@ def scipy_minimize_sharpe(data):
         return equal_weights_baseline(data)
 
 
-def riskfolio_sharpe_optimized(data):
+def riskfolio_sharpe_optimized(data, min_investment=0.001, max_weight=0.02):
     """
     Modified Riskfolio approach optimized for Sharpe ratio.
-    
+
     Uses mean-variance optimization from riskfolio-lib instead of HRP
     to optimize Sharpe ratio while satisfying constraints.
-    
+
     Constraints satisfied:
     - Budget: built into riskfolio optimization
-    - Every asset allocated: post-processing to ensure minimum weights
-    
+    - Every asset allocated: minimum weight enforcement
+    - Max weight per asset: 2% diversification constraint
+
     Args:
         data: Stock price data (DataFrame)
-    
+        min_investment: Minimum weight per asset (default 0.001)
+        max_weight: Maximum weight per asset (default 0.02 = 2%)
+
     Returns:
         weights: Optimized portfolio weights
     """
@@ -253,13 +265,23 @@ def riskfolio_sharpe_optimized(data):
         # Calculate returns
         returns = np.log(data) - np.log(data.shift(1))
         returns = returns.dropna()
-        
+
         # Create portfolio object
         port = rp.Portfolio(returns=returns)
-        
+
         # Estimate expected returns and covariance
         port.assets_stats(method_mu='hist', method_cov='hist')
-        
+
+        # Set bound constraints
+        n_assets = len(data.columns)
+
+        # Lower bounds (minimum weight per asset)
+        port.lowerret = min_investment
+
+        # Upper bounds (max weight per asset)
+        port.ainequality = np.eye(n_assets)  # Identity matrix for individual asset constraints
+        port.binequality = np.full(n_assets, max_weight)  # Max weight per asset
+
         # Optimize for maximum Sharpe ratio (mean-variance optimization)
         weights_rf = port.optimization(
             model='Classic',  # Classic mean-variance
@@ -269,13 +291,13 @@ def riskfolio_sharpe_optimized(data):
             l=0,              # No regularization,
             solver='MOSEK'
         )
-        
+
         weights = np.array(weights_rf).flatten()
-        weights = ensure_valid_weights(weights)
-        
+        weights = ensure_valid_weights(weights, min_weight_per_asset=min_investment)
+
         logger.debug(f'Riskfolio Sharpe optimization completed. Sharpe: {sharpe_fitness_function(weights, data):.4f}')
         return weights
-        
+
     except Exception as e:
         logger.warning(f'Riskfolio optimization failed: {e}. Using equal weights.')
         return equal_weights_baseline(data)
@@ -313,32 +335,32 @@ def dwave_nl_sharpe(data, budget, min_investment):
     n_cols = data.shape[1]
     print(f"Number of assets: {n_cols}")
 
-    # Create continuous decision variables for investments
-    # Scale up for integer representation (D-Wave optimization uses integers)
-    # Use scale factor that ensures min_investment_scaled >= 1
-    # Adjust scale factor based on budget to avoid exceeding D-Wave integer limits
+    # Work directly with dollar amounts (no scaling)
     # D-Wave integer variables have a practical limit around 10^9
-    max_safe_value = 1e9  # Safe upper bound for D-Wave integers
-    scale_factor = min(1000, int(max_safe_value / budget))
-    scale_factor = max(100, scale_factor)  # Ensure minimum scale factor of 100
-    max_scaled_investment = int(budget * scale_factor)
+    # So budget and min_investment should be chosen such that budget <= 1e9
+    max_safe_value = int(1e9)
 
-    print(f"Scaling Parameters:")
-    print(f"  - Scale factor: {scale_factor}")
-    print(f"  - Max scaled investment: {max_scaled_investment}")
-    print(f"  - Budget scaled: {int(budget * scale_factor)}")
-    print(f"  - Min investment scaled: {max(1, int(min_investment * scale_factor))}")
+    if budget > max_safe_value:
+        raise ValueError(f"Budget {budget} exceeds D-Wave integer limit {max_safe_value}. Use budget <= {max_safe_value}")
 
-    # Integer investment amounts for each asset
+    # Calculate minimum investment in integer dollars
+    min_investment_dollars = max(1, int(budget * min_investment))
+    max_investment_dollars = int(budget)
+
+    print(f"Investment Parameters (no scaling):")
+    print(f"  - Budget: ${budget:,.0f}")
+    print(f"  - Min investment per asset: ${min_investment_dollars:,.0f} ({min_investment*100:.4f}%)")
+    print(f"  - Max investment (budget): ${max_investment_dollars:,.0f}")
+
+    # Integer investment amounts for each asset (in dollars, no scaling)
     print("Creating decision variables...")
-    investments = [model.integer(lower_bound=0, upper_bound=max_scaled_investment)
+    investments = [model.integer(lower_bound=min_investment_dollars, upper_bound=max_investment_dollars)
                    for _ in range(n_cols)]
     print(f"  - Created {n_cols} integer investment variables")
 
     # Constants
-    budget_scaled = model.constant(int(budget * scale_factor))
-    min_investment_scaled = model.constant(max(1, int(min_investment * scale_factor)))
-    max_investment_scaled = model.constant(max_scaled_investment)
+    budget_const = model.constant(int(budget))
+    min_investment_const = model.constant(min_investment_dollars)
     one_const = model.constant(1)
     zero_const = model.constant(0)
     min_std_const = model.constant(0.0001)
@@ -349,18 +371,19 @@ def dwave_nl_sharpe(data, budget, min_investment):
     # Budget constraint: 0.95 * budget <= sum of investments <= budget
     print("Adding constraints...")
     total_investment = add(*investments)
-    budget_lower_bound = model.constant(int(budget * scale_factor * 0.95))
+    budget_lower_bound = model.constant(int(budget * 0.95))
     model.add_constraint(total_investment >= budget_lower_bound)
-    model.add_constraint(total_investment <= budget_scaled)
-
-    # Minimum investment constraints - ensure all weights > 0
+    model.add_constraint(total_investment <= budget_const)
     constraint_count = 0
+
+    # Maximum diversification constraint: max 2% per asset
+    max_weight_per_asset = 0.02  # 2% maximum
+    max_allowed_investment = model.constant(int(budget * max_weight_per_asset))
     for i in range(n_cols):
-        # Each investment must be at least min_investment
-        model.add_constraint(investments[i] >= min_investment_scaled)
+        model.add_constraint(investments[i] <= max_allowed_investment)
         constraint_count += 1
 
-    print(f"  - Added {constraint_count} minimum investment constraints (all assets > {min_investment})")
+    print(f"  - Added {n_cols} max diversification constraints (max {max_weight_per_asset*100:.1f}% per asset)")
 
     # Calculate weights from investments
     print("Constructing objective function...")
@@ -411,8 +434,8 @@ def dwave_nl_sharpe(data, budget, min_investment):
 
     # Model summary
     print(f"\nModel Summary:")
-    print(f"  - Decision variables: {n_cols} integer investments")
-    print(f"  - Total constraints: {1 + constraint_count} (1 budget + {constraint_count} min investment)")
+    print(f"  - Decision variables: {n_cols} integer investments (min: ${min_investment_dollars:,.0f}, max: ${max_investment_dollars:,.0f})")
+    print(f"  - Total constraints: {2 + constraint_count} (2 budget + {constraint_count} max diversification)")
     print(f"  - Objective: Maximize Sharpe Ratio")
 
     print("\nSubmitting to D-Wave LeapHybridNLSampler...")
@@ -426,13 +449,20 @@ def dwave_nl_sharpe(data, budget, min_investment):
     # The solution is stored in the model after sampling
     print("\nExtracting solution...")
     optimized_investments = np.array([investments[i].state() for i in range(n_cols)])
-    print(f"Optimized Investments (scaled):")
+
+    # Verify order matches input
+    print(f"\nOrder verification:")
+    print(f"  - Input columns: {list(data.columns)}")
+    print(f"  - Extraction indices: {list(range(n_cols))}")
+
+    print(f"\nOptimized Investments (in dollars):")
     for i, (col, inv) in enumerate(zip(data.columns, optimized_investments)):
-        print(f"  - {col}: {inv} (unscaled: {inv/scale_factor:.4f})")
+        print(f"  - [{i}] {col}: ${inv:,.2f}")
 
     optimized_weights = optimized_investments / optimized_investments.sum()
-    print(f"\nOptimized Weights:")
-    print(optimized_weights)
+    print(f"\nOptimized Weights (scientific notation):")
+    for i, (col, w) in enumerate(zip(data.columns, optimized_weights)):
+        print(f"  - {col}: {w:.6e}")
     # for i, (col, w) in enumerate(zip(data.columns, optimized_weights)):
     #     print(f"  - {col}: {w:.6f} ({w*100:.2f}%)")
 
