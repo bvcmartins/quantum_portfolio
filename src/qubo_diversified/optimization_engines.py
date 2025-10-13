@@ -229,7 +229,7 @@ def riskfolio_qubo(data, max_weight=None):
             max_weight = min(0.10, 10 * equal_weight)
 
         port.ainequality = np.eye(n_assets)  # Identity matrix for individual asset constraints
-        port.binequality = np.full(n_assets, max_weight)  # Adaptive max per asset
+        port.binequality = np.full((n_assets, 1), max_weight)  # Adaptive max per asset (column vector)
 
         # Fixed risk aversion parameter (equivalent to risk_level=0.5)
         # In Riskfolio, risk aversion (rm) controls the risk-return tradeoff
@@ -242,8 +242,7 @@ def riskfolio_qubo(data, max_weight=None):
             obj='Utility',  # Utility maximization (return - risk_aversion * risk)
             rf=0.0,  # Risk-free rate
             l=risk_aversion,  # Risk aversion parameter
-            hist=True,
-            solver='CLARABEL'  # Free open-source solver
+            hist=True
         )
 
         if weights is not None and len(weights) > 0:
