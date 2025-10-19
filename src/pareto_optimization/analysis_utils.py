@@ -129,14 +129,27 @@ def plot_pareto_frontier(results_dict, title="Pareto Frontier", show_dominated=T
     # Create plot
     plt.figure(figsize=(12, 8))
 
-    # Plot all points
+    # Plot all points with lambda labels
     if show_dominated:
-        plt.scatter(risks, returns, c=risk_levels, cmap='viridis',
-                   s=100, alpha=0.3, label='All Solutions', edgecolors='gray')
+        # Plot dominated points
+        dominated_mask = [rl not in pareto_risk_levels for rl in risk_levels]
+        dominated_risks = [risks[i] for i in range(len(risks)) if dominated_mask[i]]
+        dominated_returns = [returns[i] for i in range(len(returns)) if dominated_mask[i]]
+        dominated_lambdas = [risk_levels[i] for i in range(len(risk_levels)) if dominated_mask[i]]
+
+        plt.scatter(dominated_risks, dominated_returns, color='lightgray',
+                   s=100, alpha=0.4, label='Dominated Solutions', edgecolors='gray')
+
+        # Annotate dominated points with lambda
+        for risk, ret, rl in zip(dominated_risks, dominated_returns, dominated_lambdas):
+            plt.text(risk, ret, f'λ={rl:.1f}',
+                    ha='center', va='bottom',
+                    fontsize=8,
+                    bbox=dict(boxstyle='round,pad=0.2', facecolor='lightgray', alpha=0.6, edgecolor='gray'))
 
     # Plot Pareto frontier
     plt.scatter(pareto_risks_sorted, pareto_returns_sorted,
-               c=pareto_risk_levels_sorted, cmap='viridis',
+               color='steelblue',
                s=200, alpha=0.9, edgecolors='black', linewidths=2,
                label='Pareto Frontier', marker='D')
 
@@ -144,14 +157,12 @@ def plot_pareto_frontier(results_dict, title="Pareto Frontier", show_dominated=T
     plt.plot(pareto_risks_sorted, pareto_returns_sorted,
             'k--', alpha=0.5, linewidth=1.5)
 
-    # Annotate Pareto points with risk_level
+    # Annotate Pareto points with risk_level (lambda) on top of each point
     for risk, ret, rl in zip(pareto_risks_sorted, pareto_returns_sorted, pareto_risk_levels_sorted):
-        plt.annotate(f'λ={rl:.2f}',
-                    xy=(risk, ret),
-                    xytext=(5, 5),
-                    textcoords='offset points',
-                    fontsize=9,
-                    bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.3))
+        plt.text(risk, ret, f'λ={rl:.1f}',
+                ha='center', va='bottom',
+                fontsize=9, fontweight='bold',
+                bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8, edgecolor='black'))
 
     # Plot benchmark if provided
     if benchmark_point is not None:
@@ -164,7 +175,6 @@ def plot_pareto_frontier(results_dict, title="Pareto Frontier", show_dominated=T
     plt.xlabel('Portfolio Risk (Volatility)', fontsize=12)
     plt.ylabel('Portfolio Return', fontsize=12)
     plt.title(title, fontsize=14, fontweight='bold')
-    plt.colorbar(label='Risk Aversion Parameter (λ)')
     plt.legend(loc='best', fontsize=10)
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
@@ -184,13 +194,14 @@ def plot_pareto_frontier(results_dict, title="Pareto Frontier", show_dominated=T
         print(f"{rl:<12.3f} {ret:<12.6f} {risk:<12.6f} {sharpe:<12.4f}")
 
 
-def compare_pareto_frontiers(frontiers_dict, title="Pareto Frontier Comparison"):
+def compare_pareto_frontiers(frontiers_dict, title="Pareto Frontier Comparison", annotate_lambda=False):
     """
     Compare Pareto frontiers from multiple optimization methods.
 
     Args:
         frontiers_dict: Dictionary mapping method_name -> results_dict
         title: Plot title
+        annotate_lambda: If True, annotate points with lambda values (only recommended for single method)
     """
     plt.figure(figsize=(14, 9))
 
@@ -208,9 +219,10 @@ def compare_pareto_frontiers(frontiers_dict, title="Pareto Frontier Comparison")
         pareto_risks = [pareto_solutions[rl]['portfolio_risk'] for rl in pareto_risk_levels]
 
         # Sort by risk
-        pareto_sorted = sorted(zip(pareto_risks, pareto_returns))
+        pareto_sorted = sorted(zip(pareto_risks, pareto_returns, pareto_risk_levels))
         pareto_risks_sorted = [x[0] for x in pareto_sorted]
         pareto_returns_sorted = [x[1] for x in pareto_sorted]
+        pareto_risk_levels_sorted = [x[2] for x in pareto_sorted]
 
         # Plot
         plt.scatter(pareto_risks_sorted, pareto_returns_sorted,
@@ -220,6 +232,14 @@ def compare_pareto_frontiers(frontiers_dict, title="Pareto Frontier Comparison")
 
         plt.plot(pareto_risks_sorted, pareto_returns_sorted,
                 alpha=0.6, linewidth=2, color=colors[idx], linestyle='--')
+
+        # Annotate with lambda values if requested
+        if annotate_lambda:
+            for risk, ret, rl in zip(pareto_risks_sorted, pareto_returns_sorted, pareto_risk_levels_sorted):
+                plt.text(risk, ret, f'λ={rl:.2f}',
+                        ha='center', va='bottom',
+                        fontsize=8, fontweight='bold',
+                        bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.7, edgecolor=colors[idx]))
 
     plt.xlabel('Portfolio Risk (Volatility)', fontsize=12)
     plt.ylabel('Portfolio Return', fontsize=12)
