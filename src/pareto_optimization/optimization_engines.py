@@ -141,14 +141,21 @@ def genetic_algorithm_qubo(data, risk_level=0.5, population_size=500, num_genera
     return population[best_idx]
 
 
-def scipy_slsqp_qubo(data, risk_level=0.5, max_weight=None):
+def scipy_slsqp_qubo(data, risk_level=0.5, max_weight=None, n_retries=3):
     """
     SciPy SLSQP optimizer for QUBO portfolio optimization with parameterized risk level.
+
+    Improved version with:
+    - Multiple random initializations
+    - Tighter tolerances for better convergence
+    - More iterations for large portfolios
+    - Retry mechanism with different starting points
 
     Args:
         data: Stock price DataFrame
         risk_level: Risk aversion parameter for Pareto optimization
         max_weight: Maximum weight per asset (default None = adaptive)
+        n_retries: Number of retries with different initializations (default 3)
 
     Returns:
         weights: Optimized portfolio weights
@@ -171,27 +178,56 @@ def scipy_slsqp_qubo(data, risk_level=0.5, max_weight=None):
 
     bounds = [(0.001, max_weight) for _ in range(n_assets)]  # Min 0.1%, adaptive max per asset
 
-    # Initial guess (equal weights)
-    x0 = np.full(n_assets, 1.0 / n_assets)
+    best_result = None
+    best_objective = np.inf
 
-    try:
-        result = optimize.minimize(
-            objective_function,
-            x0,
-            method='SLSQP',
-            bounds=bounds,
-            constraints=constraints,
-            options={'maxiter': 1000}
-        )
+    # Try multiple initializations
+    initializations = []
 
-        if result.success:
-            return result.x
-        else:
-            logger.warning(f"SciPy optimization failed: {result.message}")
-            return np.full(n_assets, np.nan)
+    # 1. Equal weights (conservative start)
+    initializations.append(np.full(n_assets, 1.0 / n_assets))
 
-    except Exception as e:
-        logger.error(f"SciPy SLSQP optimization error: {e}")
+    # 2. Random weights with bias towards diversification
+    for _ in range(n_retries - 1):
+        x0_random = np.random.dirichlet(np.ones(n_assets) * 2)  # Dirichlet ensures sum=1
+        x0_random = np.clip(x0_random, 0.001, max_weight)  # Enforce bounds
+        x0_random = x0_random / x0_random.sum()  # Re-normalize
+        initializations.append(x0_random)
+
+    for i, x0 in enumerate(initializations):
+        try:
+            result = optimize.minimize(
+                objective_function,
+                x0,
+                method='SLSQP',
+                bounds=bounds,
+                constraints=constraints,
+                options={
+                    'maxiter': 2000,      # Increased for large portfolios
+                    'ftol': 1e-9,         # Tighter function tolerance
+                    'eps': 1e-8,          # Smaller step for gradient estimation
+                    'disp': False
+                }
+            )
+
+            # Check if this is the best result so far
+            if result.fun < best_objective:
+                best_objective = result.fun
+                best_result = result
+
+        except Exception as e:
+            logger.debug(f"SciPy SLSQP attempt {i+1} failed: {e}")
+            continue
+
+    # Return best result from all attempts
+    if best_result is not None and best_result.success:
+        return best_result.x
+    elif best_result is not None:
+        # Return best attempt even if not marked as successful
+        logger.warning(f"SciPy optimization converged with warning: {best_result.message}")
+        return best_result.x
+    else:
+        logger.error(f"SciPy SLSQP optimization failed after {len(initializations)} attempts")
         return np.full(n_assets, np.nan)
 
 
@@ -400,9 +436,33 @@ def dwave_cqm_qubo(data, risk_level=0.5, budget=1000000.0, max_weight=None):
     sampler = LeapHybridCQMSampler()
     logger.info("Sampler initialized")
 
+    # Ask for permission before calling D-Wave API
+    print("\n" + "="*80)
+    print("⚠️  READY TO CALL D-WAVE QUANTUM API")
+    print("="*80)
+    print(f"Risk Level (λ): {risk_level}")
+    print(f"Assets: {n_assets}")
+    print(f"Variables: {cqm.num_variables()}")
+    print(f"Constraints: {cqm.num_constraints()}")
+    print(f"Estimated time: ~20-60 seconds")
+    print(f"This will consume D-Wave QPU time credits")
+    print("="*80)
+
+    # Get user permission
+    response = input("Do you want to proceed with D-Wave API call? (yes/no): ").strip().lower()
+
+    if response not in ['yes', 'y']:
+        print("❌ D-Wave API call cancelled by user")
+        logger.info("D-Wave API call cancelled by user")
+        logger.info("=== D-WAVE CQM QUBO OPTIMIZATION END ===")
+        logger.info("="*80)
+        return np.full(n_assets, np.nan)
+
+    print("✓ Proceeding with D-Wave API call...")
     logger.info("*** THIS IS WHERE THE QUANTUM SOLVER IS CALLED - MAY TAKE SEVERAL MINUTES ***")
     results = sampler.sample_cqm(cqm, time_limit=20, label="Pareto_QUBO_Portfolio_Optimization")
     logger.info("D-Wave quantum solver completed!")
+    print("✓ D-Wave quantum solver completed!")
 
     n_samples = len(results.record)
     logger.info(f'Number of samples returned: {n_samples}')

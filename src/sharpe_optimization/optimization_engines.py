@@ -508,6 +508,12 @@ def dwave_nl_sharpe(data, budget, min_investment):
 
     # Extract best solution from the model's state
     # The solution is stored in the model after sampling
+
+    print("### Full State ###")
+    for i in range(n_cols):
+        print(f'investment: {investments[i]}')
+        print(investments[i].state())
+    print("#######")
     print("\nExtracting solution...")
     optimized_investments = np.array([investments[i].state() for i in range(n_cols)])
 
@@ -524,6 +530,8 @@ def dwave_nl_sharpe(data, budget, min_investment):
     print(f"\nOptimized Weights (scientific notation):")
     for i, (col, w) in enumerate(zip(data.columns, optimized_weights)):
         print(f"  - {col}: {w:.6e}")
+
+
     # for i, (col, w) in enumerate(zip(data.columns, optimized_weights)):
     #     print(f"  - {col}: {w:.6f} ({w*100:.2f}%)")
 
