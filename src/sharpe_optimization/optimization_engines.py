@@ -473,16 +473,10 @@ def dwave_nl_sharpe(data, budget, min_investment):
     #         variance_terms.append(variance_term)
     # portfolio_variance = add(*variance_terms)
     # Portfolio variance: w^T * Cov * w
-    variance_terms = []
-    for i in range(n_cols):
-        # For each asset i, compute: weights[i] * sum_j(cov[i,j] * weights[j])
-        row_const = model.constant(annual_covariance[i, :])  # covariance row i
-        cov_weighted = multiply(row_const, weights)  # cov[i,j] * weights[j] for all j
-        row_contrib = multiply(weights[i], cov_weighted.sum())  # weights[i] * sum_j(...)
-        variance_terms.append(row_contrib)
-
-    portfolio_variance = add(*variance_terms)
-    print(f"  - Constructed portfolio variance expression ({len(variance_terms)} terms)")
+    covariance_constant = model.constant(annual_covariance)
+    cov_times_weights = multiply(covariance_constant, weights).sum(axis=1)  # Each row: sum_j(cov[i,j] * w[j])
+    portfolio_variance = multiply(weights, cov_times_weights).sum()  # sum_i(w[i] * (Cov*w)[i])
+    print("  - Constructed portfolio variance expression")
 
     # Ensure positive variance
     portfolio_variance = maximum(portfolio_variance, min_var_const)
