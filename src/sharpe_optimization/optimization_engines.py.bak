@@ -416,7 +416,8 @@ def dwave_nl_sharpe(data, budget, min_investment):
 
     # Integer investment amounts for each asset (in dollars, no scaling)
     print("Creating decision variables...")
-    investments = model.integer(n_cols, lower_bound=min_investment_dollars, upper_bound=max_investment_dollars)
+    investments = [model.integer(lower_bound=min_investment_dollars, upper_bound=max_investment_dollars)
+                   for _ in range(n_cols)]
     print(f"  - Created {n_cols} integer investment variables")
 
     # Constants
@@ -431,7 +432,7 @@ def dwave_nl_sharpe(data, budget, min_investment):
 
     # Budget constraint: 0.95 * budget <= sum of investments <= budget
     print("Adding constraints...")
-    total_investment = investments.sum()
+    total_investment = add(*investments)
     budget_lower_bound = model.constant(int(budget * 0.95))
     model.add_constraint(total_investment >= budget_lower_bound)
     model.add_constraint(total_investment <= budget_const)
@@ -439,48 +440,34 @@ def dwave_nl_sharpe(data, budget, min_investment):
 
     # Maximum diversification constraint: adaptive max weight per asset
     max_allowed_investment = model.constant(int(budget * max_weight_per_asset))
-    model.add_constraint((investments <= max_allowed_investment).all())
-    constraint_count = n_cols  # One constraint per asset
+    for i in range(n_cols):
+        model.add_constraint(investments[i] <= max_allowed_investment)
+        constraint_count += 1
+
     print(f"  - Added {n_cols} max diversification constraints (max {max_weight_per_asset*100:.1f}% per asset, adaptive)")
 
     # Calculate weights from investments
     print("Constructing objective function...")
-    #weights = [safe_divide(investments[i], total_investment) for i in range(n_cols)]
-    weights = safe_divide(investments, total_investment)
+    weights = [safe_divide(investments[i], total_investment) for i in range(n_cols)]
     print("  - Calculated weight variables from investments")
 
     # Portfolio expected return
-    # return_terms = []
-    # for i in range(n_cols):
-    #     expected_return_const = model.constant(expected_annual_returns[i])
-    #     return_term = multiply(expected_return_const, weights[i])
-    #     return_terms.append(return_term)
-    # portfolio_return = add(*return_terms)
-    #return_terms = []
-    returns_constant = model.constant(np.array([expected_annual_returns[i] for i in range(n_cols)]))
-    return_term = multiply(returns_constant, weights)
-    portfolio_return = return_term.sum()
-
+    return_terms = []
+    for i in range(n_cols):
+        expected_return_const = model.constant(expected_annual_returns[i])
+        return_term = multiply(expected_return_const, weights[i])
+        return_terms.append(return_term)
+    portfolio_return = add(*return_terms)
     print("  - Constructed portfolio return expression")
 
     # Portfolio variance
-    # variance_terms = []
-    # for i in range(n_cols):
-    #     for j in range(n_cols):
-    #         cov_const = model.constant(annual_covariance[i, j])
-    #         cov_term = multiply(cov_const, weights[i])
-    #         variance_term = multiply(cov_term, weights[j])
-    #         variance_terms.append(variance_term)
-    # portfolio_variance = add(*variance_terms)
-    # Portfolio variance: w^T * Cov * w
     variance_terms = []
     for i in range(n_cols):
-        # For each asset i, compute: weights[i] * sum_j(cov[i,j] * weights[j])
-        row_const = model.constant(annual_covariance[i, :])  # covariance row i
-        cov_weighted = multiply(row_const, weights)  # cov[i,j] * weights[j] for all j
-        row_contrib = multiply(weights[i], cov_weighted.sum())  # weights[i] * sum_j(...)
-        variance_terms.append(row_contrib)
-
+        for j in range(n_cols):
+            cov_const = model.constant(annual_covariance[i, j])
+            cov_term = multiply(cov_const, weights[i])
+            variance_term = multiply(cov_term, weights[j])
+            variance_terms.append(variance_term)
     portfolio_variance = add(*variance_terms)
     print(f"  - Constructed portfolio variance expression ({len(variance_terms)} terms)")
 
@@ -495,7 +482,6 @@ def dwave_nl_sharpe(data, budget, min_investment):
     # Ensure minimum std for numerical stability
     portfolio_std_bounded = maximum(portfolio_std, min_std_const)
     model.add_constraint(portfolio_std >= min_std_const)
-    constraint_count += 1  # Add 1 for min std constraint
     print(f"  - Applied minimum std constraint: {min_std_const}")
 
     # Sharpe ratio (assuming risk-free rate = 0)
@@ -510,36 +496,35 @@ def dwave_nl_sharpe(data, budget, min_investment):
     # Model summary
     print(f"\nModel Summary:")
     print(f"  - Decision variables: {n_cols} integer investments (min: ${min_investment_dollars:,.0f}, max: ${max_investment_dollars:,.0f})")
-    print(f"  - Total constraints: {2 + constraint_count} (2 budget + {n_cols} max diversification + 1 min std)")
+    print(f"  - Total constraints: {2 + constraint_count} (2 budget + {constraint_count} max diversification)")
     print(f"  - Objective: Maximize Sharpe Ratio")
 
     print("\nSubmitting to D-Wave LeapHybridNLSampler...")
     sampler = LeapHybridNLSampler()
     print("  - Sampler initialized")
 
-    sampleset = sampler.sample(model, time_limit=20, label="Sharpe_Portfolio_Optimization_mod").result()
+    sampleset = sampler.sample(model, time_limit=20, label="Sharpe_Portfolio_Optimization").result()
     print("  - Sampling complete")
-    model.lock()
+
     # Extract best solution from the model's state
     # The solution is stored in the model after sampling
 
-    # print("### Full State ###")
-    # for i in range(n_cols):
-    #     print(f'investment: {investments[i]}')
-    #     print(investments[i].state())
-    # print("#######")
-    # print("\nExtracting solution...")
-    #optimized_investments = np.array([investments[i].state() for i in range(n_cols)])
-    optimized_investments = np.array(investments.state())
+    print("### Full State ###")
+    for i in range(n_cols):
+        print(f'investment: {investments[i]}')
+        print(investments[i].state())
+    print("#######")
+    print("\nExtracting solution...")
+    optimized_investments = np.array([investments[i].state() for i in range(n_cols)])
 
-    # # Verify order matches input
-    # print(f"\nOrder verification:")
-    # print(f"  - Input columns: {list(data.columns)}")
-    # print(f"  - Extraction indices: {list(range(n_cols))}")
+    # Verify order matches input
+    print(f"\nOrder verification:")
+    print(f"  - Input columns: {list(data.columns)}")
+    print(f"  - Extraction indices: {list(range(n_cols))}")
 
-    # print(f"\nOptimized Investments (in dollars):")
-    # for i, (col, inv) in enumerate(zip(data.columns, optimized_investments)):
-    #     print(f"  - [{i}] {col}: ${inv:,.2f}")
+    print(f"\nOptimized Investments (in dollars):")
+    for i, (col, inv) in enumerate(zip(data.columns, optimized_investments)):
+        print(f"  - [{i}] {col}: ${inv:,.2f}")
 
     optimized_weights = optimized_investments / optimized_investments.sum()
     print(f"\nOptimized Weights (scientific notation):")
