@@ -78,10 +78,9 @@ def genetic_algorithm_qubo(data, risk_level=0.5, population_size=500, num_genera
     """
     n_assets = len(data.columns)
 
-    # Adaptive max weight: 10x equal weight or 10% cap, whichever is lower
+    # Max weight: 30% to match D-Wave CQM behavior (was: 10x equal weight or 10% cap)
     if max_weight is None:
-        equal_weight = 1.0 / n_assets
-        max_weight = min(0.10, 10 * equal_weight)
+        max_weight = 0.30
 
     n_elite = int(population_size * elitism)
 
@@ -90,7 +89,7 @@ def genetic_algorithm_qubo(data, risk_level=0.5, population_size=500, num_genera
     for _ in range(population_size):
         weights = np.random.rand(n_assets)
         weights = weights / weights.sum()  # Normalize to sum to 1
-        weights = np.clip(weights, 0.001, max_weight)  # Enforce max allocation
+        weights = np.clip(weights, 0.0003, max_weight)  # Min 0.03%, max 30%
         weights = weights / weights.sum()  # Re-normalize
         population.append(weights)
 
@@ -129,7 +128,7 @@ def genetic_algorithm_qubo(data, risk_level=0.5, population_size=500, num_genera
 
             # Normalize weights to sum to 1 and enforce max allocation
             child = child / child.sum() if child.sum() > 0 else np.full(n_assets, 1.0/n_assets)
-            child = np.clip(child, 0.001, max_weight)  # Enforce max allocation
+            child = np.clip(child, 0.0003, max_weight)  # Min 0.03%, max 30%
             child = child / child.sum()  # Re-normalize
             new_population.append(child)
 
@@ -162,10 +161,9 @@ def scipy_slsqp_qubo(data, risk_level=0.5, max_weight=None, n_retries=3):
     """
     n_assets = len(data.columns)
 
-    # Adaptive max weight: 10x equal weight or 10% cap, whichever is lower
+    # Max weight: 30% to match D-Wave CQM behavior (was: 10x equal weight or 10% cap)
     if max_weight is None:
-        equal_weight = 1.0 / n_assets
-        max_weight = min(0.10, 10 * equal_weight)
+        max_weight = 0.30
 
     def objective_function(weights):
         # Minimize negative objective (maximize objective)
@@ -176,7 +174,7 @@ def scipy_slsqp_qubo(data, risk_level=0.5, max_weight=None, n_retries=3):
         {'type': 'eq', 'fun': lambda x: np.sum(x) - 1.0},  # Budget constraint
     ]
 
-    bounds = [(0.001, max_weight) for _ in range(n_assets)]  # Min 0.1%, adaptive max per asset
+    bounds = [(0.0003, max_weight) for _ in range(n_assets)]  # Min 0.03%, max 30%
 
     best_result = None
     best_objective = np.inf
@@ -190,7 +188,7 @@ def scipy_slsqp_qubo(data, risk_level=0.5, max_weight=None, n_retries=3):
     # 2. Random weights with bias towards diversification
     for _ in range(n_retries - 1):
         x0_random = np.random.dirichlet(np.ones(n_assets) * 2)  # Dirichlet ensures sum=1
-        x0_random = np.clip(x0_random, 0.001, max_weight)  # Enforce bounds
+        x0_random = np.clip(x0_random, 0.0003, max_weight)  # Min 0.03%, max 30%
         x0_random = x0_random / x0_random.sum()  # Re-normalize
         initializations.append(x0_random)
 
@@ -299,13 +297,23 @@ def riskfolio_qubo(data, risk_level=0.5, max_weight=None):
         # Set upper bound constraints (max weight per asset)
         n_assets = len(data.columns)
 
-        # Adaptive max weight: 10x equal weight or 10% cap, whichever is lower
+        # Max weight: 30% to match D-Wave CQM behavior (was: 10x equal weight or 10% cap)
         if max_weight is None:
-            equal_weight = 1.0 / n_assets
-            max_weight = min(0.10, 10 * equal_weight)
+            max_weight = 0.30
 
-        port.ainequality = np.eye(n_assets)  # Identity matrix for individual asset constraints
-        port.binequality = np.full((n_assets, 1), max_weight)  # Adaptive max per asset (column vector)
+        min_weight = 0.0003  # 0.03% minimum per asset
+
+        # Set upper and lower bound constraints
+        # ainequality * w <= binequality (for upper bounds: w <= max_weight)
+        # -ainequality * w <= -binequality (for lower bounds: w >= min_weight, rewritten as -w <= -min_weight)
+        port.ainequality = np.vstack([
+            np.eye(n_assets),      # Upper bounds: w_i <= max_weight
+            -np.eye(n_assets)      # Lower bounds: -w_i <= -min_weight (i.e., w_i >= min_weight)
+        ])
+        port.binequality = np.vstack([
+            np.full((n_assets, 1), max_weight),   # Upper bound values
+            np.full((n_assets, 1), -min_weight)   # Lower bound values (negative because -w_i <= -min)
+        ])
 
         # Map risk_level to Riskfolio's risk aversion parameter
         # In Riskfolio, risk aversion (rm) controls the risk-return tradeoff
@@ -350,13 +358,15 @@ def dwave_cqm_qubo(data, risk_level=0.5, budget=1000000.0, max_weight=None):
     Returns:
         weights: Optimized portfolio weights
     """
+    print("DEBUG: dwave_cqm_qubo function ENTERED")
     n_assets = len(data.columns)
+    print(f"DEBUG: n_assets = {n_assets}")
 
-    # Adaptive max weight: 10x equal weight or 10% cap, whichever is lower
+    # Max weight: 30% to match D-Wave CQM behavior (was: 10x equal weight or 10% cap)
     if max_weight is None:
-        equal_weight = 1.0 / n_assets
-        max_weight = min(0.10, 10 * equal_weight)
+        max_weight = 0.30
 
+    print("DEBUG: About to start logger.info")
     logger.info("="*80)
     logger.info("=== D-WAVE CQM QUBO OPTIMIZATION START ===")
     logger.info(f"Data shape: {data.shape}")
@@ -366,8 +376,10 @@ def dwave_cqm_qubo(data, risk_level=0.5, budget=1000000.0, max_weight=None):
     alpha = risk_level  # Use risk_level directly as alpha
     logger.info(f"Risk parameter alpha: {alpha}")
 
+    print("DEBUG: About to calculate returns")
     logger.info("Calculating returns...")
     returns = np.log(data) - np.log(data.shift(1))
+    print("DEBUG: Returns calculated")
     logger.info(f"Returns shape: {returns.shape}")
 
     logger.info("Calculating expected returns...")
@@ -399,24 +411,32 @@ def dwave_cqm_qubo(data, risk_level=0.5, budget=1000000.0, max_weight=None):
     x = {s: Integer("%s" %s, lower_bound=1, upper_bound=max_shares_with_diversification[s]) for s in stocks}
     logger.info(f"Created {len(x)} integer variables")
 
+    print("DEBUG: About to build returns objective")
     logger.info("Building returns objective term...")
     returns_obj = 0
     for idx, s in enumerate(stocks):
         returns_obj = returns_obj + price[s] * expected_returns[s] * x[s]
         if (idx + 1) % 100 == 0:
             logger.info(f"  Processed {idx + 1}/{len(stocks)} stocks for returns...")
+    print("DEBUG: Returns objective completed")
     logger.info("Returns objective term completed")
 
+    import time as time_module
+    print(f"\n⏳ Building risk objective: {len(stocks) * len(stocks):,} pairs to process (this may take 5-10 minutes for 680 assets)")
     logger.info("Building risk objective term (quadratic)...")
     risk = 0
     total_pairs = len(stocks) * len(stocks)
     processed = 0
+    start_time = time_module.time()
     for s1, s2 in product(stocks, stocks):
         coeff = float(covariance_matrix[s1][s2]) * float(price[s1]) * float(price[s2])
         risk = risk + coeff * x[s1] * x[s2]
         processed += 1
         if processed % 10000 == 0:
             logger.info(f"  Processed {processed}/{total_pairs} stock pairs for risk ({100*processed/total_pairs:.1f}%)...")
+            print(f"⏳ Progress: {processed:,}/{total_pairs:,} ({100*processed/total_pairs:.1f}%)")
+    elapsed_total = time_module.time() - start_time
+    print(f"✓ Risk objective completed in {elapsed_total/60:.1f} minutes")
     logger.info(f"Risk objective term completed ({total_pairs} pairs)")
 
     logger.info("Adding budget constraint...")
@@ -436,31 +456,12 @@ def dwave_cqm_qubo(data, risk_level=0.5, budget=1000000.0, max_weight=None):
     sampler = LeapHybridCQMSampler()
     logger.info("Sampler initialized")
 
-    # Ask for permission before calling D-Wave API
-    print("\n" + "="*80)
-    print("⚠️  READY TO CALL D-WAVE QUANTUM API")
-    print("="*80)
-    print(f"Risk Level (λ): {risk_level}")
-    print(f"Assets: {n_assets}")
-    print(f"Variables: {cqm.num_variables()}")
-    print(f"Constraints: {cqm.num_constraints()}")
-    print(f"Estimated time: ~20-60 seconds")
-    print(f"This will consume D-Wave QPU time credits")
-    print("="*80)
-
-    # Get user permission
-    response = input("Do you want to proceed with D-Wave API call? (yes/no): ").strip().lower()
-
-    if response not in ['yes', 'y']:
-        print("❌ D-Wave API call cancelled by user")
-        logger.info("D-Wave API call cancelled by user")
-        logger.info("=== D-WAVE CQM QUBO OPTIMIZATION END ===")
-        logger.info("="*80)
-        return np.full(n_assets, np.nan)
-
-    print("✓ Proceeding with D-Wave API call...")
+    # Approval is now handled by wrapper function (dwave_cqm_with_approval)
+    # No duplicate approval prompt needed here
     logger.info("*** THIS IS WHERE THE QUANTUM SOLVER IS CALLED - MAY TAKE SEVERAL MINUTES ***")
-    results = sampler.sample_cqm(cqm, time_limit=20, label="Pareto_QUBO_Portfolio_Optimization")
+    label = f"Pareto_QUBO_lambda_{risk_level:.2f}"
+    logger.info(f"D-Wave problem label: {label}")
+    results = sampler.sample_cqm(cqm, time_limit=20, label=label)
     logger.info("D-Wave quantum solver completed!")
     print("✓ D-Wave quantum solver completed!")
 
