@@ -67,15 +67,9 @@ def ensure_valid_weights(weights, min_weight_per_asset=0.001):
         Adjusted weights satisfying all constraints
     """
     weights = np.array(weights)
-    #n_assets = len(weights)
     
     # Ensure no negative weights
     weights = np.maximum(weights, 0)
-    
-    # # If all weights are zero, start with equal weights
-    # if weights.sum() == 0:
-    #     weights = np.ones(n_assets) / n_assets
-    #     return weights
     
     # Ensure minimum allocation per asset
     weights = np.maximum(weights, min_weight_per_asset)
@@ -450,13 +444,6 @@ def dwave_nl_sharpe(data, budget, min_investment):
     print("  - Calculated weight variables from investments")
 
     # Portfolio expected return
-    # return_terms = []
-    # for i in range(n_cols):
-    #     expected_return_const = model.constant(expected_annual_returns[i])
-    #     return_term = multiply(expected_return_const, weights[i])
-    #     return_terms.append(return_term)
-    # portfolio_return = add(*return_terms)
-    #return_terms = []
     returns_constant = model.constant(np.array([expected_annual_returns[i] for i in range(n_cols)]))
     return_term = multiply(returns_constant, weights)
     portfolio_return = return_term.sum()
@@ -464,26 +451,8 @@ def dwave_nl_sharpe(data, budget, min_investment):
     print("  - Constructed portfolio return expression")
 
     # Portfolio variance
-    # variance_terms = []
-    # for i in range(n_cols):
-    #     for j in range(n_cols):
-    #         cov_const = model.constant(annual_covariance[i, j])
-    #         cov_term = multiply(cov_const, weights[i])
-    #         variance_term = multiply(cov_term, weights[j])
-    #         variance_terms.append(variance_term)
-    # portfolio_variance = add(*variance_terms)
-    # Portfolio variance: w^T * Cov * w
-    # variance_terms = []
-    # for i in range(n_cols):
-    #     # For each asset i, compute: weights[i] * sum_j(cov[i,j] * weights[j])
-    #     row_const = model.constant(annual_covariance[i, :])  # covariance row i
-    #     cov_weighted = multiply(row_const, weights)  # cov[i,j] * weights[j] for all j
-    #     row_contrib = multiply(weights[i], cov_weighted.sum())  # weights[i] * sum_j(...)
-    #     variance_terms.append(row_contrib)
     cov = {(j, k):annual_covariance[j,k] for j in range(n_cols) for k in range(n_cols)}
     portfolio_variance = model.quadratic_model(weights, cov)
-
-    #print(f"  - Constructed portfolio variance expression ({len(variance_terms)} terms)")
 
     # Ensure positive variance
     portfolio_variance = maximum(portfolio_variance, min_var_const)
@@ -521,49 +490,12 @@ def dwave_nl_sharpe(data, budget, min_investment):
     sampleset = sampler.sample(model, time_limit=20, label="Sharpe_Portfolio_Optimization_mod").result()
     print("  - Sampling complete")
     model.lock()
-    # Extract best solution from the model's state
-    # The solution is stored in the model after sampling
 
-    # print("### Full State ###")
-    # for i in range(n_cols):
-    #     print(f'investment: {investments[i]}')
-    #     print(investments[i].state())
-    # print("#######")
-    # print("\nExtracting solution...")
-    #optimized_investments = np.array([investments[i].state() for i in range(n_cols)])
     optimized_investments = np.array(investments.state())
-
-    # # Verify order matches input
-    # print(f"\nOrder verification:")
-    # print(f"  - Input columns: {list(data.columns)}")
-    # print(f"  - Extraction indices: {list(range(n_cols))}")
-
-    # print(f"\nOptimized Investments (in dollars):")
-    # for i, (col, inv) in enumerate(zip(data.columns, optimized_investments)):
-    #     print(f"  - [{i}] {col}: ${inv:,.2f}")
-
     optimized_weights = optimized_investments / optimized_investments.sum()
     print(f"\nOptimized Weights (scientific notation):")
     for i, (col, w) in enumerate(zip(data.columns, optimized_weights)):
         print(f"  - {col}: {w:.6e}")
-
-
-    # for i, (col, w) in enumerate(zip(data.columns, optimized_weights)):
-    #     print(f"  - {col}: {w:.6f} ({w*100:.2f}%)")
-
-    # # Calculate and log final portfolio statistics
-    # final_sharpe, final_return, final_vol = portfolio_stats(optimized_weights, data)
-    # print(f"\nFinal Portfolio Statistics:")
-    # print(f"  - Sharpe Ratio: {final_sharpe:.6f}")
-    # print(f"  - Expected Return: {final_return:.6f}")
-    # print(f"  - Volatility (Std Dev): {final_vol:.6f}")
-
-    # # Validation checks
-    # print(f"\nValidation Checks:")
-    # print(f"  - Sum of weights: {optimized_weights.sum():.6f} (should be ~1.0)")
-    # print(f"  - Min weight: {optimized_weights.min():.6f} (should be >= {min_investment:.6f})")
-    # print(f"  - Max weight: {optimized_weights.max():.6f}")
-    # print(f"  - All weights positive: {np.all(optimized_weights > 0)}")
 
     print("="*80)
     print("D-Wave NL Sharpe Optimization Completed Successfully")
