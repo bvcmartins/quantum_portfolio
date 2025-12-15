@@ -58,26 +58,26 @@ def ensure_valid_weights(weights, min_weight_per_asset=0.001):
     Ensure weights satisfy constraints:
     1. Sum to 1 (budget constraint)
     2. Every asset has positive allocation (no zero weights)
-    
+
     Args:
         weights: Raw portfolio weights
         min_weight_per_asset: Minimum weight per asset to ensure allocation
-    
+
     Returns:
         Adjusted weights satisfying all constraints
     """
-    weights = np.array(weights)
-    
+    # Ensure we have a proper 1D numpy array of floats
+    weights = np.asarray(weights, dtype=np.float64).flatten()
+
     # Ensure no negative weights
-    weights = np.maximum(weights, 0)
-    
+    weights = np.maximum(weights, 0.0)
+
     # Ensure minimum allocation per asset
     weights = np.maximum(weights, min_weight_per_asset)
-    
+
     # Normalize to sum to 1 (budget constraint)
     weights = weights / weights.sum()
-    weights = np.array(weights)
-    
+
     return weights
 
 
@@ -250,8 +250,8 @@ def riskfolio_sharpe_optimized(data, min_investment=0.001, max_weight=None):
     """
     Modified Riskfolio approach optimized for Sharpe ratio.
 
-    Uses mean-variance optimization from riskfolio-lib instead of HRP
-    to optimize Sharpe ratio while satisfying constraints.
+    Uses mean-variance optimization from riskfolio-lib to optimize
+    Sharpe ratio while satisfying constraints.
     Applies Ledoit-Wolf shrinkage for robust covariance estimation.
 
     Constraints satisfied:
@@ -266,92 +266,149 @@ def riskfolio_sharpe_optimized(data, min_investment=0.001, max_weight=None):
 
     Returns:
         weights: Optimized portfolio weights
+
+    Raises:
+        Exception: If Riskfolio optimization fails (no fallback to equal weights)
     """
-    try:
-        # Calculate returns
-        returns = np.log(data) - np.log(data.shift(1))
-        returns = returns.dropna()
+    # Calculate returns
+    returns = np.log(data) - np.log(data.shift(1))
+    returns = returns.dropna()
 
-        logger.debug(f"Returns shape: {returns.shape}, data shape: {data.shape}")
+    # Ensure returns is a proper DataFrame with float64 dtype
+    returns = returns.astype(np.float64)
 
-        # Create portfolio object
-        port = rp.Portfolio(returns=returns)
+    logger.debug(f"Returns shape: {returns.shape}, data shape: {data.shape}, returns dtype: {returns.dtypes.unique()}")
 
-        # Calculate risk and return parameters with Ledoit-Wolf shrinkage
-        # Use method_cov='ledoit' which applies shrinkage internally
-        logger.debug("Calculating portfolio statistics with Ledoit-Wolf shrinkage...")
-        port.assets_stats(method_mu='hist', method_cov='ledoit')
+    # Create portfolio object
+    port = rp.Portfolio(returns=returns)
 
-        logger.debug(f"Covariance matrix shape: {port.cov.shape}")
+    # Calculate risk and return parameters with Ledoit-Wolf shrinkage
+    logger.debug("Calculating portfolio statistics with Ledoit-Wolf shrinkage...")
+    port.assets_stats(method_mu='hist', method_cov='ledoit')
 
-        # Verify positive definiteness
-        eigenvalues = np.linalg.eigvalsh(port.cov.values)
-        min_eigenvalue = eigenvalues.min()
-        logger.debug(f"Covariance matrix eigenvalues - min: {min_eigenvalue:.8e}, max: {eigenvalues.max():.8e}")
+    logger.debug(f"Covariance matrix shape: {port.cov.shape}")
 
-        # Use Riskfolio's built-in cov_fix method if needed
-        threshold = 1e-5
-        if min_eigenvalue < threshold:
-            logger.warning(f"Covariance matrix eigenvalue {min_eigenvalue:.8e} below threshold {threshold:.8e}")
-            logger.debug("Applying Riskfolio's cov_fix method...")
+    # Verify positive definiteness
+    eigenvalues = np.linalg.eigvalsh(port.cov.values)
+    min_eigenvalue = eigenvalues.min()
+    logger.debug(f"Covariance matrix eigenvalues - min: {min_eigenvalue:.8e}, max: {eigenvalues.max():.8e}")
 
-            # Apply Riskfolio's built-in fix
-            import riskfolio.AuxFunctions as af
-            port.cov = af.cov_fix(port.cov, method='clipped', threshold=1e-5)
+    # Use Riskfolio's built-in cov_fix method if needed
+    threshold = 1e-5
+    if min_eigenvalue < threshold:
+        logger.warning(f"Covariance matrix eigenvalue {min_eigenvalue:.8e} below threshold {threshold:.8e}")
+        logger.debug("Applying Riskfolio's cov_fix method...")
 
-            # Verify fix worked
-            new_eigenvalues = np.linalg.eigvalsh(port.cov.values)
-            new_min_eig = new_eigenvalues.min()
-            logger.debug(f"After cov_fix, min eigenvalue: {new_min_eig:.8e}")
+        # Apply Riskfolio's built-in fix
+        import riskfolio.AuxFunctions as af
+        port.cov = af.cov_fix(port.cov, method='clipped', threshold=1e-5)
 
-            # If still not positive definite, apply manual regularization
-            if new_min_eig < 1e-6:
-                logger.warning(f"Still not positive definite after cov_fix. Applying manual regularization.")
-                epsilon = 1e-5
-                import pandas as pd
-                port.cov = port.cov + epsilon * pd.DataFrame(np.eye(len(port.cov)),
-                                                             index=port.cov.index,
-                                                             columns=port.cov.columns)
-                final_min_eig = np.linalg.eigvalsh(port.cov.values).min()
-                logger.debug(f"After manual regularization (epsilon={epsilon:.8e}), min eigenvalue: {final_min_eig:.8e}")
+        # Verify fix worked
+        new_eigenvalues = np.linalg.eigvalsh(port.cov.values)
+        new_min_eig = new_eigenvalues.min()
+        logger.debug(f"After cov_fix, min eigenvalue: {new_min_eig:.8e}")
 
-        logger.debug("Covariance matrix is positive definite and ready for optimization")
+        # If still not positive definite, apply manual regularization
+        if new_min_eig < 1e-6:
+            logger.warning(f"Still not positive definite after cov_fix. Applying manual regularization.")
+            epsilon = 1e-5
+            import pandas as pd
+            port.cov = port.cov + epsilon * pd.DataFrame(np.eye(len(port.cov)),
+                                                         index=port.cov.index,
+                                                         columns=port.cov.columns)
+            final_min_eig = np.linalg.eigvalsh(port.cov.values).min()
+            logger.debug(f"After manual regularization (epsilon={epsilon:.8e}), min eigenvalue: {final_min_eig:.8e}")
 
-        # Set bound constraints
-        n_assets = len(data.columns)
+    logger.debug("Covariance matrix is positive definite and ready for optimization")
 
-        # Adaptive max weight: 10x equal weight or 10% cap, whichever is lower
-        if max_weight is None:
-            equal_weight = 1.0 / n_assets
-            max_weight = min(0.10, 10 * equal_weight)
+    # Set bound constraints
+    n_assets = len(data.columns)
 
-        # Lower bounds (minimum weight per asset)
-        port.lowerret = min_investment
+    # Adaptive max weight: 10x equal weight or 10% cap, whichever is lower
+    if max_weight is None:
+        equal_weight = 1.0 / n_assets
+        max_weight = min(0.10, 10 * equal_weight)
 
-        # Upper bounds (adaptive max weight per asset)
-        port.ainequality = np.eye(n_assets)  # Identity matrix for individual asset constraints
-        port.binequality = np.full(n_assets, max_weight)  # Adaptive max weight per asset
+    # Set bounds using the proper riskfolio format
+    # The issue was pandas Series with scalar constructor - use dict instead
+    import pandas as pd
+    asset_names = list(data.columns)  # Convert to list to ensure proper indexing
 
-        # Optimize for maximum Sharpe ratio (mean-variance optimization)
-        logger.debug("Running Riskfolio Sharpe optimization...")
-        weights_rf = port.optimization(
-            model='Classic',  # Classic mean-variance
-            rm='MV',         # Mean-Variance risk measure
-            obj='Sharpe',    # Maximize Sharpe ratio
-            rf=0.0,          # Risk-free rate
-            l=0,              # No regularization,
-            solver='CLARABEL'  # Free open-source solver
-        )
+    # Create bounds as dict first, then convert to Series
+    # This ensures proper dtype and avoids cvxpy issues
+    upper_dict = {asset: float(max_weight) for asset in asset_names}
+    lower_dict = {asset: 0.0 for asset in asset_names}
 
-        weights = np.array(weights_rf).flatten()
-        weights = ensure_valid_weights(weights, min_weight_per_asset=min_investment)
+    port.upperlng = pd.Series(upper_dict)
+    port.lowerlng = pd.Series(lower_dict)
+    # Don't set short bounds, let defaults handle it
 
-        logger.debug(f'Riskfolio Sharpe optimization completed. Sharpe: {sharpe_fitness_function(weights, data):.4f}')
-        return weights
+    logger.debug(f"Set bounds via dict - upper={max_weight:.6f}, lower=0.0")
+    logger.debug(f"Bounds dtype: {port.upperlng.dtype}, values type: {type(port.upperlng.iloc[0])}")
+    logger.debug(f"Returns data check - shape: {returns.shape}, dtypes: {returns.dtypes.unique()}")
 
-    except Exception as e:
-        logger.warning(f'Riskfolio optimization failed: {e}. Using equal weights.', exc_info=True)
-        return equal_weights_baseline(data)
+    # Optimize for maximum Sharpe ratio with high regularization for numerical stability
+    # With p >> n (more assets than observations), need strong regularization
+    logger.debug("Running Riskfolio Sharpe optimization with high regularization...")
+
+    # Try with increasing regularization until it works
+    l_values = [0.1, 0.3, 0.5, 0.7, 1.0]
+    weights_rf = None
+
+    for l_val in l_values:
+        try:
+            logger.debug(f"Attempting optimization with l={l_val}")
+            weights_rf = port.optimization(
+                model='Classic',  # Classic mean-variance
+                rm='MV',         # Mean-Variance risk measure
+                obj='Sharpe',    # Maximize Sharpe ratio
+                rf=0.0,          # Risk-free rate
+                l=l_val,         # L2 regularization
+                hist=True        # Use historical scenarios
+            )
+            if weights_rf is not None and len(weights_rf) > 0:
+                logger.info(f"Optimization succeeded with l={l_val}")
+                break
+        except Exception as e:
+            logger.debug(f"Failed with l={l_val}: {str(e)[:100]}")
+            continue
+
+    if weights_rf is None or len(weights_rf) == 0:
+        raise ValueError("Riskfolio optimization returned None or empty weights")
+
+    # Debug: Check what riskfolio returned
+    logger.debug(f"Riskfolio returned type: {type(weights_rf)}")
+    logger.debug(f"Riskfolio returned shape: {weights_rf.shape}")
+    logger.debug(f"Riskfolio returned dtypes: {weights_rf.dtypes if hasattr(weights_rf, 'dtypes') else 'N/A'}")
+
+    # Extract values from DataFrame and flatten to 1D array
+    # Ensure we get a proper 1D numpy array of floats
+    if isinstance(weights_rf, pd.DataFrame):
+        # If it's a DataFrame, extract the first column's values
+        weights = weights_rf.iloc[:, 0].values.astype(np.float64)
+    elif isinstance(weights_rf, pd.Series):
+        # If it's a Series, extract values directly
+        weights = weights_rf.values.astype(np.float64)
+    else:
+        # Otherwise try to convert to array
+        weights = np.asarray(weights_rf, dtype=np.float64).flatten()
+
+    logger.debug(f"Extracted weights shape: {weights.shape}, dtype: {weights.dtype}")
+
+    # Post-process: apply minimum investment and normalize
+    weights = ensure_valid_weights(weights, min_weight_per_asset=min_investment)
+
+    # Enforce max weight constraint if needed
+    if weights.max() > max_weight:
+        logger.debug(f"Clipping weights above {max_weight:.6f}")
+        weights = np.minimum(weights, max_weight)
+        weights = weights / weights.sum()  # Re-normalize after clipping
+
+    sharpe = sharpe_fitness_function(weights, data)
+    logger.info(f'Riskfolio Sharpe optimization completed successfully. Sharpe: {sharpe:.4f}')
+    logger.debug(f'Weight statistics: min={weights.min():.6f}, max={weights.max():.6f}, mean={weights.mean():.6f}')
+
+    return weights
 
 
 def dwave_nl_sharpe(data, budget, min_investment):
